@@ -79,7 +79,7 @@
  *   `addGlobalMcpServer` / `updateGlobalMcpServer` /
  *   `removeGlobalMcpServer` / `beginGlobalMcpServerAuth` /
  *   `completeGlobalMcpServerAuth` / `cancelGlobalMcpServerAuth` /
- *   `resetGlobalMcpServerAuth` / `mcp.oauth.server.*` /
+ *   `resetGlobalMcpServerAuth` / server-addressed MCP OAuth methods /
  *   `testGlobalMcpServer` → the v1 user-global
  *   MCP surface, rebuilt in `src/v2/global-mcp.ts`: agent-core-v2 only reads
  *   the user-global `mcp.json` (nothing in the engine writes it) and binds
@@ -2182,7 +2182,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   override async beginGlobalMcpServerAuth(name: string): Promise<BeginGlobalMcpServerAuthResult> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireOAuthMcpServer(server);
-    return this['mcp.oauth.server.begin']({
+    return this.beginMcpServerAuth({
       serverName: server.name,
       serverUrl: config.url,
     });
@@ -2192,48 +2192,48 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     input: { readonly flowId: string; readonly timeoutMs?: number },
     signal?: AbortSignal,
   ): Promise<void> {
-    return this['mcp.oauth.server.complete'](input, signal);
+    return this.completeMcpServerAuth(input, signal);
   }
 
   override async cancelGlobalMcpServerAuth(flowId: string): Promise<void> {
-    return this['mcp.oauth.server.cancel']({ flowId });
+    return this.cancelMcpServerAuth({ flowId });
   }
 
   override async resetGlobalMcpServerAuth(name: string): Promise<void> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireRemoteMcpServer(server);
-    return this['mcp.oauth.server.reset']({
+    return this.resetMcpServerAuth({
       serverName: server.name,
       serverUrl: config.url,
     });
   }
 
-  override async ['mcp.oauth.server.begin'](
+  override async beginMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<McpOAuthServerBeginResult> {
     return (await this.mcpOAuthServerController()).begin(input);
   }
 
-  override async ['mcp.oauth.server.complete'](
+  override async completeMcpServerAuth(
     input: McpOAuthServerCompleteInput,
     signal?: AbortSignal,
   ): Promise<void> {
     return (await this.mcpOAuthServerController()).complete(input, { signal });
   }
 
-  override async ['mcp.oauth.server.cancel'](
+  override async cancelMcpServerAuth(
     input: McpOAuthServerCancelInput,
   ): Promise<void> {
     return (await this.mcpOAuthServerController()).cancel(input);
   }
 
-  override async ['mcp.oauth.server.reset'](
+  override async resetMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<void> {
     return (await this.mcpOAuthServerController()).reset(input);
   }
 
-  override async ['mcp.oauth.server.status'](
+  override async getMcpServerAuthStatus(
     input: McpOAuthServerStatusInput,
   ): Promise<McpOAuthServerStatusResult> {
     return (await this.mcpOAuthServerController()).status(input);

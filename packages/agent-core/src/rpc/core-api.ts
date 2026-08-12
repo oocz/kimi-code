@@ -568,15 +568,11 @@ export interface CoreAPI extends SessionAPIWithId {
   completeGlobalMcpServerAuth: (payload: CompleteGlobalMcpServerAuthPayload) => void;
   cancelGlobalMcpServerAuth: (payload: CancelGlobalMcpServerAuthPayload) => void;
   resetGlobalMcpServerAuth: (payload: GlobalMcpServerNamePayload) => void;
-  'mcp.oauth.server.begin': (
-    payload: McpOAuthServerIdentity,
-  ) => McpOAuthServerBeginResult;
-  'mcp.oauth.server.complete': (payload: McpOAuthServerCompleteInput) => void;
-  'mcp.oauth.server.cancel': (payload: McpOAuthServerCancelInput) => void;
-  'mcp.oauth.server.reset': (payload: McpOAuthServerIdentity) => void;
-  'mcp.oauth.server.status': (
-    payload: McpOAuthServerStatusInput,
-  ) => McpOAuthServerStatusResult;
+  beginMcpServerAuth: (payload: McpOAuthServerIdentity) => McpOAuthServerBeginResult;
+  completeMcpServerAuth: (payload: McpOAuthServerCompleteInput) => void;
+  cancelMcpServerAuth: (payload: McpOAuthServerCancelInput) => void;
+  resetMcpServerAuth: (payload: McpOAuthServerIdentity) => void;
+  getMcpServerAuthStatus: (payload: McpOAuthServerStatusInput) => McpOAuthServerStatusResult;
   testGlobalMcpServer: (payload: TestGlobalMcpServerPayload) => GlobalMcpServerTestResult;
   createSession: (payload: CreateSessionPayload) => SessionSummary;
   closeSession: (payload: CloseSessionPayload) => void;

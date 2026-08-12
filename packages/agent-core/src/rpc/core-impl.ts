@@ -822,7 +822,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   ): Promise<BeginGlobalMcpServerAuthResult> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireOAuthMcpServer(server);
-    return this['mcp.oauth.server.begin']({
+    return this.beginMcpServerAuth({
       serverName: server.name,
       serverUrl: config.url,
     });
@@ -832,50 +832,50 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     { flowId, timeoutMs }: CompleteGlobalMcpServerAuthPayload,
     options: { readonly signal?: AbortSignal } = {},
   ): Promise<void> {
-    return this['mcp.oauth.server.complete']({ flowId, timeoutMs }, options);
+    return this.completeMcpServerAuth({ flowId, timeoutMs }, options);
   }
 
   async cancelGlobalMcpServerAuth(
     { flowId }: CancelGlobalMcpServerAuthPayload,
   ): Promise<void> {
-    return this['mcp.oauth.server.cancel']({ flowId });
+    return this.cancelMcpServerAuth({ flowId });
   }
 
   async resetGlobalMcpServerAuth({ name }: GlobalMcpServerNamePayload): Promise<void> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireRemoteMcpServer(server);
-    return this['mcp.oauth.server.reset']({
+    return this.resetMcpServerAuth({
       serverName: server.name,
       serverUrl: config.url,
     });
   }
 
-  async ['mcp.oauth.server.begin'](
+  async beginMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<BeginGlobalMcpServerAuthResult> {
     return this.mcpOAuthServerController.begin(input);
   }
 
-  async ['mcp.oauth.server.complete'](
+  async completeMcpServerAuth(
     input: McpOAuthServerCompleteInput,
     options: { readonly signal?: AbortSignal } = {},
   ): Promise<void> {
     return this.mcpOAuthServerController.complete(input, options);
   }
 
-  async ['mcp.oauth.server.cancel'](
+  async cancelMcpServerAuth(
     input: McpOAuthServerCancelInput,
   ): Promise<void> {
     return this.mcpOAuthServerController.cancel(input);
   }
 
-  async ['mcp.oauth.server.reset'](
+  async resetMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<void> {
     return this.mcpOAuthServerController.reset(input);
   }
 
-  async ['mcp.oauth.server.status'](
+  async getMcpServerAuthStatus(
     input: McpOAuthServerStatusInput,
   ): Promise<McpOAuthServerStatusResult> {
     return this.mcpOAuthServerController.status(input);

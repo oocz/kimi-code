@@ -365,40 +365,40 @@ export abstract class SDKRpcClientBase {
     return rpc.resetGlobalMcpServerAuth({ name });
   }
 
-  async ['mcp.oauth.server.begin'](
+  async beginMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<McpOAuthServerBeginResult> {
     const rpc = await this.getRpc();
-    return rpc['mcp.oauth.server.begin'](input);
+    return rpc.beginMcpServerAuth(input);
   }
 
-  async ['mcp.oauth.server.complete'](
+  async completeMcpServerAuth(
     input: McpOAuthServerCompleteInput,
     signal?: AbortSignal,
   ): Promise<void> {
     const rpc = await this.getRpc();
-    return rpc['mcp.oauth.server.complete'](input, { signal });
+    return rpc.completeMcpServerAuth(input, { signal });
   }
 
-  async ['mcp.oauth.server.cancel'](
+  async cancelMcpServerAuth(
     input: McpOAuthServerCancelInput,
   ): Promise<void> {
     const rpc = await this.getRpc();
-    return rpc['mcp.oauth.server.cancel'](input);
+    return rpc.cancelMcpServerAuth(input);
   }
 
-  async ['mcp.oauth.server.reset'](
+  async resetMcpServerAuth(
     input: McpOAuthServerIdentity,
   ): Promise<void> {
     const rpc = await this.getRpc();
-    return rpc['mcp.oauth.server.reset'](input);
+    return rpc.resetMcpServerAuth(input);
   }
 
-  async ['mcp.oauth.server.status'](
+  async getMcpServerAuthStatus(
     input: McpOAuthServerStatusInput,
   ): Promise<McpOAuthServerStatusResult> {
     const rpc = await this.getRpc();
-    return rpc['mcp.oauth.server.status'](input);
+    return rpc.getMcpServerAuthStatus(input);
   }
 
   async testGlobalMcpServer(
