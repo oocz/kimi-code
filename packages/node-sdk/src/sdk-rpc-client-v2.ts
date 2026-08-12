@@ -79,7 +79,8 @@
  *   `addGlobalMcpServer` / `updateGlobalMcpServer` /
  *   `removeGlobalMcpServer` / `beginGlobalMcpServerAuth` /
  *   `completeGlobalMcpServerAuth` / `cancelGlobalMcpServerAuth` /
- *   `resetGlobalMcpServerAuth` / `testGlobalMcpServer` → the v1 user-global
+ *   `resetGlobalMcpServerAuth` / `mcp.oauth.server.*` /
+ *   `testGlobalMcpServer` → the v1 user-global
  *   MCP surface, rebuilt in `src/v2/global-mcp.ts`: agent-core-v2 only reads
  *   the user-global `mcp.json` (nothing in the engine writes it) and binds
  *   its OAuth orchestrator inside the session scope, so the file store and
@@ -126,7 +127,6 @@
  *   surfaces the v2 secondary-model warning next to the AGENTS.md one,
  *   matching v1's aggregate.
  */
-import { randomUUID } from 'node:crypto';
 import { readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 
@@ -136,10 +136,18 @@ import {
   HookDefSchema,
   KimiError,
   limitAgentReplayByTurns,
+  mcpOAuthServerAuthStatusFromProbe,
+  McpOAuthServerController,
   noopTelemetryClient,
   type AgentContextData,
   type BeginGlobalMcpServerAuthResult,
   type ExperimentalFeatureState,
+  type McpOAuthServerBeginResult,
+  type McpOAuthServerCancelInput,
+  type McpOAuthServerCompleteInput,
+  type McpOAuthServerIdentity,
+  type McpOAuthServerStatusInput,
+  type McpOAuthServerStatusResult,
 } from '@moonshot-ai/agent-core';
 import { encodeWorkDirKey } from '@moonshot-ai/agent-core-v2/_base/utils/workdir-slug';
 import { MCP_SECTION, type McpSection } from '@moonshot-ai/agent-core-v2/app/mcpConfig/configSection';
@@ -148,7 +156,6 @@ import { McpConnectionManager } from '@moonshot-ai/agent-core-v2/mcpCore/connect
 import {
   AlreadyAuthorizedError,
   McpOAuthService,
-  type BeginAuthorizationResult,
 } from '@moonshot-ai/agent-core-v2/mcpCore/oauth/service';
 import { createMcpOAuthStore } from '@moonshot-ai/agent-core-v2/app/mcpConfig/oauthStore';
 import { SECONDARY_MODEL_SECTION } from '@moonshot-ai/agent-core-v2/app/kosongConfig/configSection';
@@ -349,9 +356,6 @@ export interface SDKRpcClientV2Options {
  */
 const MAX_TIMER_DELAY_MS = 0x7fffffff;
 
-/** v1's default for `completeGlobalMcpServerAuth` when the host gives no timeout. */
-const DEFAULT_GLOBAL_MCP_AUTH_TIMEOUT_MS = 15 * 60 * 1000;
-
 export class SDKRpcClientV2 extends SDKRpcClientBase {
   readonly homeDir: string;
   readonly configPath: string;
@@ -398,8 +402,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
    * v1's `<home>/credentials/mcp/` file store).
    */
   private globalMcpOAuth: McpOAuthService | undefined;
-  /** In-flight OAuth flows keyed by the flowId handed to the host (v1 shape). */
-  private readonly globalMcpOAuthFlows = new Map<string, { flow: BeginAuthorizationResult }>();
+  private globalMcpOAuthServerController: Promise<McpOAuthServerController> | undefined;
   /**
    * Per-live-session event/interaction wirings (`src/v2/session-wiring.ts`):
    * created when a session materializes through this client (create / resume /
@@ -2109,6 +2112,33 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     return this.globalMcpOAuth;
   }
 
+  private async mcpOAuthServerController(): Promise<McpOAuthServerController> {
+    this.globalMcpOAuthServerController ??= this.createMcpOAuthServerController();
+    return this.globalMcpOAuthServerController;
+  }
+
+  private async createMcpOAuthServerController(): Promise<McpOAuthServerController> {
+    return new McpOAuthServerController({
+      service: await this.globalMcpOAuthService(),
+      isAlreadyAuthorizedError: (error) => error instanceof AlreadyAuthorizedError,
+      verifyStatusWithNetwork: (identity) =>
+        this.withGlobalMcpServerProbe(
+          {
+            name: identity.serverName,
+            transport: 'http',
+            url: identity.serverUrl,
+            auth: 'oauth',
+          },
+          undefined,
+          (manager) =>
+            mcpOAuthServerAuthStatusFromProbe(
+              identity.serverName,
+              manager.get(identity.serverName),
+            ),
+        ),
+    });
+  }
+
   override async listGlobalMcpServers(): Promise<readonly McpServerConfig[]> {
     return this.globalMcpConfig.list();
   }
@@ -2145,63 +2175,68 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
   }
 
   /**
-   * v1's flow state machine verbatim: the guards (`requireOAuthMcpServer`)
-   * run before any network I/O, a begun flow is held by flowId until
-   * complete/cancel, and an already-authorized server short-circuits without
-   * a flowId. The OAuth work itself is the v2 engine's `McpOAuthService`
-   * (same begin/complete/cancel contract as v1's).
+   * The legacy global-server facade keeps its config guards, then delegates
+   * flow state to the shared server-addressed controller. The OAuth work
+   * itself is the v2 engine's `McpOAuthService`.
    */
   override async beginGlobalMcpServerAuth(name: string): Promise<BeginGlobalMcpServerAuthResult> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireOAuthMcpServer(server);
-    try {
-      const oauth = await this.globalMcpOAuthService();
-      const flow = await oauth.beginAuthorization(server.name, config.url);
-      const flowId = randomUUID();
-      this.globalMcpOAuthFlows.set(flowId, { flow });
-      return {
-        status: 'authorization-required',
-        flowId,
-        authorizationUrl: flow.authorizationUrl.toString(),
-      };
-    } catch (error) {
-      if (error instanceof AlreadyAuthorizedError) {
-        return { status: 'already-authorized' };
-      }
-      throw error;
-    }
+    return this['mcp.oauth.server.begin']({
+      serverName: server.name,
+      serverUrl: config.url,
+    });
   }
 
   override async completeGlobalMcpServerAuth(
     input: { readonly flowId: string; readonly timeoutMs?: number },
     signal?: AbortSignal,
   ): Promise<void> {
-    const active = this.globalMcpOAuthFlows.get(input.flowId);
-    if (active === undefined) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, `Unknown MCP OAuth flow: ${input.flowId}`);
-    }
-    try {
-      await active.flow.complete({
-        signal,
-        timeoutMs: input.timeoutMs ?? DEFAULT_GLOBAL_MCP_AUTH_TIMEOUT_MS,
-      });
-    } finally {
-      this.globalMcpOAuthFlows.delete(input.flowId);
-    }
+    return this['mcp.oauth.server.complete'](input, signal);
   }
 
   override async cancelGlobalMcpServerAuth(flowId: string): Promise<void> {
-    const active = this.globalMcpOAuthFlows.get(flowId);
-    if (active === undefined) return;
-    this.globalMcpOAuthFlows.delete(flowId);
-    await active.flow.cancel();
+    return this['mcp.oauth.server.cancel']({ flowId });
   }
 
   override async resetGlobalMcpServerAuth(name: string): Promise<void> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireRemoteMcpServer(server);
-    const oauth = await this.globalMcpOAuthService();
-    await oauth.invalidate(server.name, config.url);
+    return this['mcp.oauth.server.reset']({
+      serverName: server.name,
+      serverUrl: config.url,
+    });
+  }
+
+  override async ['mcp.oauth.server.begin'](
+    input: McpOAuthServerIdentity,
+  ): Promise<McpOAuthServerBeginResult> {
+    return (await this.mcpOAuthServerController()).begin(input);
+  }
+
+  override async ['mcp.oauth.server.complete'](
+    input: McpOAuthServerCompleteInput,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    return (await this.mcpOAuthServerController()).complete(input, { signal });
+  }
+
+  override async ['mcp.oauth.server.cancel'](
+    input: McpOAuthServerCancelInput,
+  ): Promise<void> {
+    return (await this.mcpOAuthServerController()).cancel(input);
+  }
+
+  override async ['mcp.oauth.server.reset'](
+    input: McpOAuthServerIdentity,
+  ): Promise<void> {
+    return (await this.mcpOAuthServerController()).reset(input);
+  }
+
+  override async ['mcp.oauth.server.status'](
+    input: McpOAuthServerStatusInput,
+  ): Promise<McpOAuthServerStatusResult> {
+    return (await this.mcpOAuthServerController()).status(input);
   }
 
   /**

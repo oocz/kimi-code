@@ -5,7 +5,15 @@ import { join } from 'pathe';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
-import { McpOAuthClientProvider, McpOAuthService } from '../../src/mcp/oauth';
+import {
+  AlreadyAuthorizedError,
+  McpOAuthClientProvider,
+  mcpOAuthServerAuthStatusFromProbe,
+  McpOAuthServerController,
+  McpOAuthService,
+  type BeginAuthorizationResult,
+  type McpOAuthServerService,
+} from '../../src/mcp/oauth';
 import { JsonFileStore, sanitizeStoreKey } from '../../src/mcp/oauth/store';
 
 describe('sanitizeStoreKey', () => {
@@ -158,10 +166,268 @@ describe('MCP OAuth credential identity', () => {
   });
 });
 
+describe('McpOAuthServerController', () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), 'kimi-mcp-oauth-controller-'));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it('begins authorization for the normalized server identity', async () => {
+    const calls: Array<{ serverName: string; serverUrl: string }> = [];
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async (serverName, serverUrl) => {
+        calls.push({ serverName, serverUrl: serverUrl.toString() });
+        return oauthFlow();
+      }),
+      createFlowId: () => 'flow_test',
+    });
+
+    await expect(
+      controller.begin({
+        serverName: '  docs  ',
+        serverUrl: ' HTTPS://MCP.EXAMPLE.TEST:443/mcp ',
+      }),
+    ).resolves.toEqual({
+      status: 'authorization-required',
+      flowId: 'flow_test',
+      authorizationUrl: 'https://auth.example.test/authorize',
+    });
+    expect(calls).toEqual([
+      { serverName: 'docs', serverUrl: 'https://mcp.example.test/mcp' },
+    ]);
+  });
+
+  it('reports an already-authorized result without registering a flow', async () => {
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async () => {
+        throw new AlreadyAuthorizedError('docs');
+      }),
+    });
+
+    await expect(
+      controller.begin({ serverName: 'docs', serverUrl: 'https://mcp.example.test/mcp' }),
+    ).resolves.toEqual({ status: 'already-authorized' });
+  });
+
+  it('completes a registered flow once with the default timeout', async () => {
+    const completionOptions: Array<{
+      readonly signal?: AbortSignal;
+      readonly timeoutMs?: number;
+    }> = [];
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async () =>
+        oauthFlow({
+          complete: async (options) => {
+            completionOptions.push(options ?? {});
+          },
+        }),
+      ),
+      createFlowId: () => 'flow_test',
+    });
+    const started = await controller.begin({
+      serverName: 'docs',
+      serverUrl: 'https://mcp.example.test/mcp',
+    });
+    expect(started.status).toBe('authorization-required');
+
+    await controller.complete({ flowId: 'flow_test' });
+
+    expect(completionOptions).toEqual([{ signal: undefined, timeoutMs: 15 * 60 * 1000 }]);
+    await expect(controller.complete({ flowId: 'flow_test' })).rejects.toMatchObject({
+      code: 'request.invalid',
+    });
+  });
+
+  it('cancels a registered flow and treats repeated cancellation as a no-op', async () => {
+    let cancelCount = 0;
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async () =>
+        oauthFlow({
+          cancel: async () => {
+            cancelCount += 1;
+          },
+        }),
+      ),
+      createFlowId: () => 'flow_test',
+    });
+    await controller.begin({
+      serverName: 'docs',
+      serverUrl: 'https://mcp.example.test/mcp',
+    });
+
+    await controller.cancel({ flowId: 'flow_test' });
+    await controller.cancel({ flowId: 'flow_test' });
+
+    expect(cancelCount).toBe(1);
+  });
+
+  it('reads authorization status for the exact server name and URL', async () => {
+    const service = new McpOAuthService({ store: new JsonFileStore(dir) });
+    const controller = new McpOAuthServerController({ service });
+    service
+      .getProvider('docs', 'https://first.example.test/mcp')
+      .saveTokens(token('first-token'));
+
+    await expect(
+      controller.status({
+        serverName: 'docs',
+        serverUrl: 'https://first.example.test/mcp',
+      }),
+    ).resolves.toEqual({ authStatus: 'oauth-authorized' });
+    await expect(
+      controller.status({
+        serverName: 'docs',
+        serverUrl: 'https://second.example.test/mcp',
+      }),
+    ).resolves.toEqual({ authStatus: 'oauth-required' });
+  });
+
+  it('keeps status local when network verification is not requested', async () => {
+    const service = new McpOAuthService({ store: new JsonFileStore(dir) });
+    service
+      .getProvider('docs', 'https://mcp.example.test/mcp')
+      .saveTokens(token('access-token'));
+    const controller = new McpOAuthServerController({
+      service,
+      verifyStatusWithNetwork: () => {
+        throw new Error('network verification must not run');
+      },
+    });
+
+    await expect(
+      controller.status({
+        serverName: 'docs',
+        serverUrl: 'https://mcp.example.test/mcp',
+      }),
+    ).resolves.toEqual({ authStatus: 'oauth-authorized' });
+  });
+
+  it('returns the network verification result when requested', async () => {
+    const service = new McpOAuthService({ store: new JsonFileStore(dir) });
+    service
+      .getProvider('docs', 'https://mcp.example.test/mcp')
+      .saveTokens(token('access-token'));
+    const controller = new McpOAuthServerController({
+      service,
+      verifyStatusWithNetwork: () => 'oauth-required',
+    });
+
+    await expect(
+      controller.status({
+        serverName: 'docs',
+        serverUrl: 'https://mcp.example.test/mcp',
+        verifyWithNetwork: true,
+      }),
+    ).resolves.toEqual({ authStatus: 'oauth-required' });
+  });
+
+  it('does not contact the network when no stored token exists', async () => {
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async () => oauthFlow()),
+      verifyStatusWithNetwork: () => {
+        throw new Error('network verification must not run');
+      },
+    });
+
+    await expect(
+      controller.status({
+        serverName: 'docs',
+        serverUrl: 'https://mcp.example.test/mcp',
+        verifyWithNetwork: true,
+      }),
+    ).resolves.toEqual({ authStatus: 'oauth-required' });
+  });
+
+  it('resets only the credentials for the exact server name and URL', async () => {
+    const firstUrl = 'https://first.example.test/mcp';
+    const secondUrl = 'https://second.example.test/mcp';
+    const service = new McpOAuthService({ store: new JsonFileStore(dir) });
+    const controller = new McpOAuthServerController({ service });
+    service.getProvider('docs', firstUrl).saveTokens(token('reset-token'));
+    service.getProvider('docs', secondUrl).saveTokens(token('same-name-token'));
+    service.getProvider('other', firstUrl).saveTokens(token('same-url-token'));
+
+    await controller.reset({ serverName: 'docs', serverUrl: firstUrl });
+
+    expect(service.hasTokens('docs', firstUrl)).toBe(false);
+    expect(service.hasTokens('docs', secondUrl)).toBe(true);
+    expect(service.hasTokens('other', firstUrl)).toBe(true);
+  });
+
+  it.each([
+    [{ serverName: '   ', serverUrl: 'https://mcp.example.test' }, 'serverName'],
+    [{ serverName: 'docs', serverUrl: 'relative/path' }, 'serverUrl'],
+    [{ serverName: 'docs', serverUrl: 'ftp://mcp.example.test' }, 'serverUrl'],
+    [{ serverName: 'docs', serverUrl: 'https://user@mcp.example.test' }, 'serverUrl'],
+    [{ serverName: 'docs', serverUrl: 'https://mcp.example.test/#fragment' }, 'serverUrl'],
+  ])('rejects an invalid server identity (%s)', async (input, field) => {
+    const controller = new McpOAuthServerController({
+      service: fakeOAuthService(async () => oauthFlow()),
+    });
+
+    await expect(controller.status(input)).rejects.toMatchObject({
+      code: 'request.invalid',
+      message: expect.stringContaining(field),
+    });
+  });
+});
+
+describe('MCP OAuth network status classification', () => {
+  it('reports authorization when the MCP connection succeeds', () => {
+    expect(
+      mcpOAuthServerAuthStatusFromProbe('docs', {
+        status: 'connected',
+      }),
+    ).toBe('oauth-authorized');
+  });
+
+  it('reports reauthentication when the MCP server rejects authorization', () => {
+    expect(
+      mcpOAuthServerAuthStatusFromProbe('docs', {
+        status: 'needs-auth',
+      }),
+    ).toBe('oauth-required');
+  });
+
+  it('preserves connection failures instead of reporting reauthentication', () => {
+    expect(() =>
+      mcpOAuthServerAuthStatusFromProbe('docs', {
+        status: 'failed',
+        error: 'connection refused',
+      }),
+    ).toThrow(expect.objectContaining({ code: 'mcp.startup_failed' }));
+  });
+});
+
 function token(accessToken: string): OAuthTokens {
   return {
     access_token: accessToken,
     token_type: 'Bearer',
+  };
+}
+
+function fakeOAuthService(
+  beginAuthorization: McpOAuthServerService['beginAuthorization'],
+): McpOAuthServerService {
+  return {
+    beginAuthorization,
+    hasTokens: () => false,
+    invalidate: () => undefined,
+  };
+}
+
+function oauthFlow(
+  overrides: Partial<BeginAuthorizationResult> = {},
+): BeginAuthorizationResult {
+  return {
+    authorizationUrl: new URL('https://auth.example.test/authorize'),
+    complete: async () => undefined,
+    cancel: async () => undefined,
+    ...overrides,
   };
 }
 

@@ -50,6 +50,20 @@ export type {
 } from './agent/background';
 export type { CronTaskSnapshot } from './agent/cron';
 export type { ToolServices } from './tools/support/services';
+export {
+  mcpOAuthServerAuthStatusFromProbe,
+  McpOAuthServerController,
+  type McpOAuthServerAuthStatus,
+  type McpOAuthServerBeginResult,
+  type McpOAuthServerCancelInput,
+  type McpOAuthServerCompleteInput,
+  type McpOAuthServerControllerOptions,
+  type McpOAuthServerIdentity,
+  type McpOAuthServerProbeResult,
+  type McpOAuthServerService,
+  type McpOAuthServerStatusInput,
+  type McpOAuthServerStatusResult,
+} from './mcp/oauth/server-controller';
 
 // Image compression — prompt-ingestion sites (CLI paste, server upload
 // resolution, ACP) call compressBase64ForModel / compressImageForModel per

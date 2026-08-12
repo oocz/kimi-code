@@ -41,7 +41,12 @@ import {
   resolveMcpToolTimeoutMs,
   type McpServerEntry,
 } from '../../src/mcp/connection-manager';
-import { JsonFileStore, McpOAuthService } from '../../src/mcp/oauth';
+import {
+  JsonFileStore,
+  mcpOAuthServerAuthStatusFromProbe,
+  McpOAuthServerController,
+  McpOAuthService,
+} from '../../src/mcp/oauth';
 import type { AgentEvent, SDKSessionRPC } from '../../src/rpc';
 import { Session } from '../../src/session';
 import { SessionAPIImpl } from '../../src/session/rpc';
@@ -650,6 +655,75 @@ describe('McpConnectionManager', () => {
         server.close((err) => {
           if (err) reject(err);
           else resolve();
+        });
+      });
+      await rm(storeDir, { recursive: true, force: true });
+    }
+  }, 15000);
+
+  it('verifies cached OAuth credentials over a real MCP connection', async () => {
+    const mcpServer = new McpServer({ name: 'oauth-status', version: '0.0.1' });
+    mcpServer.registerTool(
+      'echo',
+      { description: 'Echoes text', inputSchema: { text: z.string() } },
+      ({ text }) => ({ content: [{ type: 'text', text }] }),
+    );
+    const transport = new StreamableHTTPServerTransport({
+      sessionIdGenerator: () => randomUUID(),
+    });
+    await mcpServer.connect(transport);
+    const server = createHttpServer((req, res) => {
+      if (req.headers.authorization !== 'Bearer valid-token') {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'unauthorized' }));
+        return;
+      }
+      void transport.handleRequest(req, res);
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as HttpAddress).port;
+    const serverUrl = `http://127.0.0.1:${port}/mcp`;
+    const storeDir = await mkdtemp(join(tmpdir(), 'kimi-mcp-oauth-status-'));
+    const oauthService = new McpOAuthService({ store: new JsonFileStore(storeDir) });
+    oauthService
+      .getProvider('docs', serverUrl)
+      .saveTokens({ access_token: 'valid-token', token_type: 'Bearer' });
+    const controller = new McpOAuthServerController({
+      service: oauthService,
+      verifyStatusWithNetwork: async (identity) => {
+        const cm = new McpConnectionManager({ oauthService });
+        try {
+          await cm.connectAll({
+            [identity.serverName]: {
+              transport: 'http',
+              url: identity.serverUrl,
+              auth: 'oauth',
+            },
+          });
+          return mcpOAuthServerAuthStatusFromProbe(
+            identity.serverName,
+            cm.get(identity.serverName),
+          );
+        } finally {
+          await cm.shutdown();
+        }
+      },
+    });
+
+    try {
+      await expect(
+        controller.status({
+          serverName: 'docs',
+          serverUrl,
+          verifyWithNetwork: true,
+        }),
+      ).resolves.toEqual({ authStatus: 'oauth-authorized' });
+    } finally {
+      await transport.close();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => {
+          if (error === undefined) resolve();
+          else reject(error);
         });
       });
       await rm(storeDir, { recursive: true, force: true });

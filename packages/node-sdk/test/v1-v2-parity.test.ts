@@ -3463,6 +3463,99 @@ async function expectSameMcpRejection(
 }
 
 describe('v1↔v2 global MCP parity', () => {
+  it('addresses OAuth status and reset by server name and URL without mcp.json', async () => {
+    const resetUrl = 'https://reset.example.test/mcp';
+    const sameNameUrl = 'https://keep.example.test/mcp';
+    const pair = await makeGlobalMcpParityPair();
+    for (const homeDir of [pair.v1HomeDir, pair.v2HomeDir]) {
+      const externalOAuth = new McpOAuthService({ kimiHomeDir: homeDir });
+      externalOAuth
+        .getProvider('docs', resetUrl)
+        .saveTokens({ access_token: 'reset-token', token_type: 'Bearer' });
+      externalOAuth
+        .getProvider('docs', sameNameUrl)
+        .saveTokens({ access_token: 'same-name-token', token_type: 'Bearer' });
+      externalOAuth
+        .getProvider('other', resetUrl)
+        .saveTokens({ access_token: 'same-url-token', token_type: 'Bearer' });
+    }
+
+    try {
+      const identity = { serverName: 'docs', serverUrl: resetUrl };
+      const before = await Promise.all([
+        pair.v1['mcp.oauth.server.status'](identity),
+        pair.v2['mcp.oauth.server.status'](identity),
+      ]);
+      expect(before).toEqual([
+        { authStatus: 'oauth-authorized' },
+        { authStatus: 'oauth-authorized' },
+      ]);
+
+      await Promise.all([
+        pair.v1['mcp.oauth.server.reset'](identity),
+        pair.v2['mcp.oauth.server.reset'](identity),
+      ]);
+
+      const [resetStatuses, sameNameStatuses, sameUrlStatuses] = await Promise.all([
+        Promise.all([
+          pair.v1['mcp.oauth.server.status'](identity),
+          pair.v2['mcp.oauth.server.status'](identity),
+        ]),
+        Promise.all([
+          pair.v1['mcp.oauth.server.status']({
+            serverName: 'docs',
+            serverUrl: sameNameUrl,
+          }),
+          pair.v2['mcp.oauth.server.status']({
+            serverName: 'docs',
+            serverUrl: sameNameUrl,
+          }),
+        ]),
+        Promise.all([
+          pair.v1['mcp.oauth.server.status']({ serverName: 'other', serverUrl: resetUrl }),
+          pair.v2['mcp.oauth.server.status']({ serverName: 'other', serverUrl: resetUrl }),
+        ]),
+      ]);
+      expect(resetStatuses).toEqual([
+        { authStatus: 'oauth-required' },
+        { authStatus: 'oauth-required' },
+      ]);
+      expect(sameNameStatuses).toEqual([
+        { authStatus: 'oauth-authorized' },
+        { authStatus: 'oauth-authorized' },
+      ]);
+      expect(sameUrlStatuses).toEqual([
+        { authStatus: 'oauth-authorized' },
+        { authStatus: 'oauth-authorized' },
+      ]);
+
+      await expectSameMcpRejection(
+        pair,
+        (client) =>
+          client['mcp.oauth.server.begin']({
+            serverName: 'docs',
+            serverUrl: 'not-an-absolute-url',
+          }),
+        (client) =>
+          client['mcp.oauth.server.begin']({
+            serverName: 'docs',
+            serverUrl: 'not-an-absolute-url',
+          }),
+      );
+      await expectSameMcpRejection(
+        pair,
+        (client) => client['mcp.oauth.server.complete']({ flowId: 'flow_missing' }),
+        (client) => client['mcp.oauth.server.complete']({ flowId: 'flow_missing' }),
+      );
+      await Promise.all([
+        pair.v1['mcp.oauth.server.cancel']({ flowId: 'flow_missing' }),
+        pair.v2['mcp.oauth.server.cancel']({ flowId: 'flow_missing' }),
+      ]);
+    } finally {
+      await closeGlobalMcpPair(pair);
+    }
+  });
+
   it('classifies global MCP authorization identically from persisted credentials', async () => {
     const statusServer = await startMcpAuthStatusServer();
     const authorizedUrl = 'https://authorized.example.test/mcp';

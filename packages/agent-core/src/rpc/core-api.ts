@@ -20,6 +20,14 @@ import type { ExperimentalFeatureState } from '#/flags';
 import type { ResumeSessionResult } from '#/rpc/resumed';
 import type { SessionMeta } from '#/session';
 import type { GlobalMcpServerConfig } from '#/mcp/global-config';
+import type {
+  McpOAuthServerBeginResult,
+  McpOAuthServerCancelInput,
+  McpOAuthServerCompleteInput,
+  McpOAuthServerIdentity,
+  McpOAuthServerStatusInput,
+  McpOAuthServerStatusResult,
+} from '#/mcp/oauth/server-controller';
 import type { ContentPart } from '@moonshot-ai/kosong';
 import type { SessionWarning } from '@moonshot-ai/protocol';
 
@@ -560,6 +568,15 @@ export interface CoreAPI extends SessionAPIWithId {
   completeGlobalMcpServerAuth: (payload: CompleteGlobalMcpServerAuthPayload) => void;
   cancelGlobalMcpServerAuth: (payload: CancelGlobalMcpServerAuthPayload) => void;
   resetGlobalMcpServerAuth: (payload: GlobalMcpServerNamePayload) => void;
+  'mcp.oauth.server.begin': (
+    payload: McpOAuthServerIdentity,
+  ) => McpOAuthServerBeginResult;
+  'mcp.oauth.server.complete': (payload: McpOAuthServerCompleteInput) => void;
+  'mcp.oauth.server.cancel': (payload: McpOAuthServerCancelInput) => void;
+  'mcp.oauth.server.reset': (payload: McpOAuthServerIdentity) => void;
+  'mcp.oauth.server.status': (
+    payload: McpOAuthServerStatusInput,
+  ) => McpOAuthServerStatusResult;
   testGlobalMcpServer: (payload: TestGlobalMcpServerPayload) => GlobalMcpServerTestResult;
   createSession: (payload: CreateSessionPayload) => SessionSummary;
   closeSession: (payload: CloseSessionPayload) => void;

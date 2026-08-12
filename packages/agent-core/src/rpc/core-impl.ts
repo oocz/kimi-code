@@ -38,15 +38,20 @@ import {
 } from '../flags';
 import type { Logger } from '../logging/types';
 import {
-  AlreadyAuthorizedError,
   GlobalMcpConfigStore,
+  mcpOAuthServerAuthStatusFromProbe,
   McpConnectionManager,
   McpOAuthService,
+  McpOAuthServerController,
   resolveMcpStartupTimeoutMs,
   resolveMcpToolTimeoutMs,
   resolveSessionMcpConfig,
   mergeCallerMcpServers,
-  type BeginAuthorizationResult,
+  type McpOAuthServerCancelInput,
+  type McpOAuthServerCompleteInput,
+  type McpOAuthServerIdentity,
+  type McpOAuthServerStatusInput,
+  type McpOAuthServerStatusResult,
   type SessionMcpConfig,
 } from '../mcp';
 import { SessionAgentProfileCatalog } from '../profile';
@@ -165,15 +170,11 @@ const WEB_SEARCH_BASE_URL_ENV = 'KIMI_WEB_SEARCH_BASE_URL';
 const WEB_SEARCH_API_KEY_ENV = 'KIMI_WEB_SEARCH_API_KEY';
 const WEB_FETCH_BASE_URL_ENV = 'KIMI_WEB_FETCH_BASE_URL';
 const WEB_FETCH_API_KEY_ENV = 'KIMI_WEB_FETCH_API_KEY';
-const DEFAULT_GLOBAL_MCP_AUTH_TIMEOUT_MS = 15 * 60 * 1000;
 type AgentScopedPayload<T> = T & { readonly agentId: string };
 type SessionScopedPayload<T> = T & { readonly sessionId: string };
 type SessionAgentPayload<T> = SessionScopedPayload<AgentScopedPayload<T>>;
 type RenameSessionRequest = SessionScopedPayload<RenameSessionPayload>;
 type UpdateSessionMetadataRequest = SessionScopedPayload<UpdateSessionMetadataPayload>;
-interface GlobalMcpOAuthFlow {
-  readonly flow: BeginAuthorizationResult;
-}
 
 export interface KimiCoreOptions {
   readonly homeDir?: string | undefined;
@@ -220,7 +221,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private readonly sessionStore: SessionStore;
   private readonly globalMcpConfig: GlobalMcpConfigStore;
   private readonly globalMcpOAuth: McpOAuthService;
-  private readonly globalMcpOAuthFlows = new Map<string, GlobalMcpOAuthFlow>();
+  private readonly mcpOAuthServerController: McpOAuthServerController;
   readonly plugins: PluginManager;
   private pluginsReady: Promise<void>;
   private pluginsLoadError: Error | undefined;
@@ -277,6 +278,24 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     });
     this.globalMcpConfig = new GlobalMcpConfigStore(this.homeDir);
     this.globalMcpOAuth = new McpOAuthService({ kimiHomeDir: this.homeDir });
+    this.mcpOAuthServerController = new McpOAuthServerController({
+      service: this.globalMcpOAuth,
+      verifyStatusWithNetwork: (identity) =>
+        this.withGlobalMcpServerProbe(
+          {
+            name: identity.serverName,
+            transport: 'http',
+            url: identity.serverUrl,
+            auth: 'oauth',
+          },
+          undefined,
+          (manager) =>
+            mcpOAuthServerAuthStatusFromProbe(
+              identity.serverName,
+              manager.get(identity.serverName),
+            ),
+        ),
+    });
     this.plugins = new PluginManager({ kimiHomeDir: this.homeDir });
     // Capture the error rather than swallow it: mutators and explicit /plugins
     // reads rethrow so the user sees what's wrong; createSession/resumeSession
@@ -803,54 +822,63 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   ): Promise<BeginGlobalMcpServerAuthResult> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireOAuthMcpServer(server);
-    try {
-      const flow = await this.globalMcpOAuth.beginAuthorization(server.name, config.url);
-      const flowId = randomUUID();
-      this.globalMcpOAuthFlows.set(flowId, { flow });
-      return {
-        status: 'authorization-required',
-        flowId,
-        authorizationUrl: flow.authorizationUrl.toString(),
-      };
-    } catch (error) {
-      if (error instanceof AlreadyAuthorizedError) {
-        return { status: 'already-authorized' };
-      }
-      throw error;
-    }
+    return this['mcp.oauth.server.begin']({
+      serverName: server.name,
+      serverUrl: config.url,
+    });
   }
 
   async completeGlobalMcpServerAuth(
     { flowId, timeoutMs }: CompleteGlobalMcpServerAuthPayload,
     options: { readonly signal?: AbortSignal } = {},
   ): Promise<void> {
-    const active = this.globalMcpOAuthFlows.get(flowId);
-    if (active === undefined) {
-      throw new KimiError(ErrorCodes.REQUEST_INVALID, `Unknown MCP OAuth flow: ${flowId}`);
-    }
-    try {
-      await active.flow.complete({
-        signal: options.signal,
-        timeoutMs: timeoutMs ?? DEFAULT_GLOBAL_MCP_AUTH_TIMEOUT_MS,
-      });
-    } finally {
-      this.globalMcpOAuthFlows.delete(flowId);
-    }
+    return this['mcp.oauth.server.complete']({ flowId, timeoutMs }, options);
   }
 
   async cancelGlobalMcpServerAuth(
     { flowId }: CancelGlobalMcpServerAuthPayload,
   ): Promise<void> {
-    const active = this.globalMcpOAuthFlows.get(flowId);
-    if (active === undefined) return;
-    this.globalMcpOAuthFlows.delete(flowId);
-    await active.flow.cancel();
+    return this['mcp.oauth.server.cancel']({ flowId });
   }
 
   async resetGlobalMcpServerAuth({ name }: GlobalMcpServerNamePayload): Promise<void> {
     const server = await this.globalMcpConfig.get(name);
     const config = requireRemoteMcpServer(server);
-    this.globalMcpOAuth.invalidate(server.name, config.url);
+    return this['mcp.oauth.server.reset']({
+      serverName: server.name,
+      serverUrl: config.url,
+    });
+  }
+
+  async ['mcp.oauth.server.begin'](
+    input: McpOAuthServerIdentity,
+  ): Promise<BeginGlobalMcpServerAuthResult> {
+    return this.mcpOAuthServerController.begin(input);
+  }
+
+  async ['mcp.oauth.server.complete'](
+    input: McpOAuthServerCompleteInput,
+    options: { readonly signal?: AbortSignal } = {},
+  ): Promise<void> {
+    return this.mcpOAuthServerController.complete(input, options);
+  }
+
+  async ['mcp.oauth.server.cancel'](
+    input: McpOAuthServerCancelInput,
+  ): Promise<void> {
+    return this.mcpOAuthServerController.cancel(input);
+  }
+
+  async ['mcp.oauth.server.reset'](
+    input: McpOAuthServerIdentity,
+  ): Promise<void> {
+    return this.mcpOAuthServerController.reset(input);
+  }
+
+  async ['mcp.oauth.server.status'](
+    input: McpOAuthServerStatusInput,
+  ): Promise<McpOAuthServerStatusResult> {
+    return this.mcpOAuthServerController.status(input);
   }
 
   async testGlobalMcpServer(
